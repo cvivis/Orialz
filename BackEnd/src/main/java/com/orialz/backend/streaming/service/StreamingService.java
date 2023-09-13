@@ -1,6 +1,11 @@
 package com.orialz.backend.streaming.service;
 
 
+import com.orialz.backend.video.domain.entity.Member;
+import com.orialz.backend.video.domain.entity.Video;
+import com.orialz.backend.video.domain.entity.VideoStatus;
+import com.orialz.backend.video.domain.repository.MemberRepository;
+import com.orialz.backend.video.domain.repository.VideoRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import net.bramp.ffmpeg.FFmpeg;
@@ -14,6 +19,7 @@ import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
+import javax.transaction.Transactional;
 import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
@@ -24,8 +30,11 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Future;
+
+import static java.util.concurrent.TimeUnit.SECONDS;
 
 
 @Service
@@ -35,24 +44,21 @@ public class StreamingService {
 
     private final FFmpeg ffmpeg;
     private final FFprobe ffprobe;
+    private final VideoRepository videoRepository;
+    private final MemberRepository memberRepository;
 
     @Value("${video.path}")
     private String rootPath;
-    Long videoId = 1L;
-    LocalDateTime date = LocalDateTime.of(2023,9,12,12,30,30);
-
     public File videoPlay(Long videoId,String fileName) throws NoSuchAlgorithmException {
-//        log.info("fileName: "+fileName); // fileName에 ts파일 이름이 들어옴
+        // fileName에 ts파일 이름이 들어옴
         // 디비에서 해당 영상의 주소 가져와서 플레이
+        Video nowVideo = videoRepository.findById(videoId).orElse(null);
 
-
-        String hashPath = hashingPath(videoId,date);
-        Long userId = 1L;
-        String path = rootPath+"/"+ userId+"/"+ hashPath+"/hls";
-
+        String path = nowVideo.getPath();
         return new File(path+"/"+fileName);
     }
 
+    // 그냥 업로드
     public String upload(MultipartFile file){
 
         if (!file.isEmpty()) {
@@ -73,7 +79,9 @@ public class StreamingService {
 
 
     @Async
-    public Future<Boolean> chunkUpload(MultipartFile file, String fileName,int chunkNumber, int totalChunkNum,Long userId) throws IOException, NoSuchAlgorithmException {
+    @Transactional
+    public Future<Boolean> chunkUpload(MultipartFile file, String fileName,int chunkNumber, int totalChunkNum,Long userId , String content,String title) throws IOException, NoSuchAlgorithmException {
+
         if (!file.isEmpty()) {
             String path = rootPath + "/" + userId; //임시 폴더 + 실제
             File output = new File(path); // 폴더 위치
@@ -88,11 +96,21 @@ public class StreamingService {
 
             // 마지막 조각이 전송 됐을 경우
             if (chunkNumber == totalChunkNum - 1) {
+                log.info(content);
+                log.info(title);
+                //해당 유저 찾기
+                Member nowMember = memberRepository.findById(userId).orElse(null);
                 // 디비에 영상 삽입. status = 0;
                 // 디비에서 가지고온 videoId , createAt
+                Video video = Video.builder()
+                        .content(content)
+                        .member(nowMember)
+                        .title(title)
+                        .status(VideoStatus.WAIT)
+                        .build();
 
-
-                String hashing = hashingPath(videoId,date);
+                Video nowVideo = videoRepository.save(video);
+                String hashing = hashingPath(nowVideo.getVideoId(), nowVideo.getCreatedAt());
                 String videoPath = path + "/"+hashing;
 
                 File hashFolder = new File(videoPath); // 폴더 위치
@@ -110,8 +128,15 @@ public class StreamingService {
                     // 합친 후 삭제
                     Files.delete(chunkFile);
                 }
+
                 log.info("File uploaded successfully");
+                //HLS 변환
                 convertToHls(videoPath,fileName);
+                //HLS경로 재생 Path로 설정
+                nowVideo.setPath(videoPath+"/hls");
+                //썸네일 설정
+                getThumbnail(videoPath+"/"+fileName,videoPath+"/"+"thumbnail.jpg");
+                nowVideo.setThumbnail(videoPath+"/"+"thumbnail.jpg");
                 return CompletableFuture.completedFuture(true);
             }
             else{
@@ -132,6 +157,7 @@ public class StreamingService {
         File output = new File(hlsPath);
         FFmpegProbeResult probeResult = ffprobe.probe(path);
         String audioCodec = "";
+        // 원본 영상의 오디오 코덱 가지고 오기
         for (FFmpegStream stream : probeResult.getStreams()) {
             System.out.println(stream.codec_type);
             if(FFmpegStream.CodecType.AUDIO.equals(stream.codec_type)){
@@ -139,12 +165,7 @@ public class StreamingService {
                 audioCodec = stream.codec_name;
 
             }
-
-//            if (stream.codec_name.toLowerCase().startsWith("h264")) {
-//                System.out.println("스트림 타입: " + stream.codec_type);
-//                System.out.println("B-프레임 갯수: " + stream.has_b_frames);
-//                System.out.println("I-프레임 간격: " + stream.nb_frames);
-//            }
+            
         }
         if (!output.exists()) {
             output.mkdirs();
@@ -188,6 +209,28 @@ public class StreamingService {
 //        log.info("SHA-256 Hash: " + sha256Hash);
         return sha256Hash;
     }
+
+    public void getThumbnail(String inputPath,String outputPath){
+        try {
+            FFmpegBuilder builder = new FFmpegBuilder()
+                    .setInput(inputPath) // 입력 동영상 파일 경로
+                    .addOutput(outputPath) // 썸네일 이미지 파일 경로
+                    .setFrames(1) // 썸네일로 추출할 프레임 수 (1개)
+                    .setVideoCodec("mjpeg") // 썸네일 이미지의 코덱 설정 (JPEG)
+                    .setVideoFrameRate(1) // 초당 프레임 수 (1프레임)
+                    .setStartOffset(1l,SECONDS)
+                    .setVideoResolution(640, 360) // 썸네일 이미지의 해상도 설정
+                    .done();
+
+            FFmpegExecutor executor = new FFmpegExecutor(new FFmpeg(), new FFprobe());
+            executor.createJob(builder).run();
+            log.info("success create thumbnail");
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+
+    }
+
 
 
 //    @Async

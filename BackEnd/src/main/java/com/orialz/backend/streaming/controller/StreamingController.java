@@ -54,11 +54,16 @@ public class StreamingController {
     public ResponseEntity<Boolean> upload(@RequestParam("chunk") MultipartFile file,
                                          @RequestParam("totalChunkNum") Integer totalChunkNum,
                                          @RequestParam("fileName") String fileName,
-                                         @RequestParam("chunkNum") Integer chunkNum) throws IOException, ExecutionException, InterruptedException, NoSuchAlgorithmException {
+                                         @RequestParam("chunkNum") Integer chunkNum,
+                                         @RequestParam(name = "content", required = false) String content,
+                                          @RequestParam(name = "content", required = false) String title
+    ) throws IOException, ExecutionException, InterruptedException, NoSuchAlgorithmException {
 
-        log.info("con: "+file);
+//        log.info("con: "+file);
         //올린 영상 제목 출력
-        Future<Boolean> future = streamingService.chunkUpload(file,fileName,chunkNum,totalChunkNum,1L);
+        Future<Boolean> future = streamingService.chunkUpload(file,fileName,chunkNum,totalChunkNum,1L,content,title);
+        Future<Boolean> future1 = streamingService.chunkUpload(file,fileName,chunkNum,totalChunkNum,2L,content,title);
+        Future<Boolean> future2 = streamingService.chunkUpload(file,fileName,chunkNum,totalChunkNum,3L,content,title);
         Boolean res = future.get();
         return ResponseEntity.ok().body(res);
     }
@@ -91,6 +96,7 @@ public class StreamingController {
         return ResponseEntity.ok()
                 .body(hash);
     }
+
 
 //    @ResponseBody
 //    @GetMapping("/async")
